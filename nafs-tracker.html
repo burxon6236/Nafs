@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Нафс-контроль</title>
+
+<!-- Поддержка домашнего экрана -->
+<meta name="theme-color" content="#0d3318">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Нафс-контроль">
+
+<!-- Иконка для домашнего экрана -->
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%230d3318'/%3E%3Ctext x='96' y='125' font-size='100' text-anchor='middle'%3E%F0%9F%95%8C%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%230d3318'/%3E%3Ctext x='96' y='125' font-size='100' text-anchor='middle'%3E%F0%9F%95%8C%3C/text%3E%3C/svg%3E">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:#0f1a10;font-family:system-ui,-apple-system,sans-serif;color:#e8f5e9;min-height:100vh}
+input,button,textarea{font-family:inherit;font-size:16px}
+button{cursor:pointer;border:none;outline:none}
+input[type=date]::-webkit-calendar-picker-indicator{filter:invert(.5)}
+.ar{direction:rtl;font-size:17px;line-height:1.9;color:#fbbf24}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  ДАННЫЕ
+// ═══════════════════════════════════════════════════════════════════════════
+const KEY='nafs-v4';
+let entries=[], view='dashboard', form=mkForm(), flashTmr=null;
+
+function today(){return new Date().toISOString().split('T')[0];}
+function mkForm(){
+  return{date:today(),type:null,followed:null,ticker:'',
+         sysTp:'',myTp:'',result:'',balance:'',editId:null};
+}
+function lastBal(){
+  // Последний баланс из любой записи
+  return entries.length ? entries[entries.length-1].balance : null;
+}
+function prevBal(i){return i>0 ? entries[i-1].balance : null;}
+function startBal(){return entries.length ? entries[0].balance : null;}
+
+function scoreOf(e){
+  if(e.type==='start')   return 0; // Начальный баланс — не считается
+  if(e.type==='notrade') return e.followed ? 1 : -1;
+  if(e.type==='trade'){
+    const s=parseFloat(e.sysTp), m=parseFloat(e.myTp);
+    return (!isNaN(s)&&!isNaN(m)&&s===m) ? 1 : -1;
+  }
+  return 0;
+}
+function totals(){
+  let good=0,bad=0,score=0;
+  entries.forEach(e=>{
+    const s=scoreOf(e);
+    if(s>0) good++; else if(s<0) bad++;
+    score+=s;
+  });
+  return{good,bad,score,total:entries.length};
+}
+function goodPct(){
+  const t=totals(), n=t.good+t.bad;
+  return n ? Math.round((t.good/n)*100) : null;
+}
+function hasStart(){return entries.length>0 && entries[0].type==='start';}
+
+function load(){try{const x=localStorage.getItem(KEY);if(x)entries=JSON.parse(x);}catch{}}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(entries));}catch{}}
+
+// ── Экспорт: скачать данные как JSON файл ────────────────────────────────
+function exportData(){
+  if(!entries.length){flash('Нет данных для экспорта ⚠️',false);return;}
+  const json=JSON.stringify(entries,null,2);
+  const blob=new Blob([json],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download='nafs-data-'+today()+'.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  flash('Альхамдулиллах — файл скачан!');
+}
+
+// ── Импорт: загрузить данные из JSON файла ───────────────────────────────
+function importData(file){
+  if(!file)return;
+  const reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      const data=JSON.parse(e.target.result);
+      if(!Array.isArray(data))throw new Error();
+      if(entries.length>0&&!confirm('Заменить текущие данные ('+entries.length+' записей) на импортируемые ('+data.length+' записей)?'))return;
+      entries=data;
+      save();
+      flash('Данные импортированы — '+data.length+' записей ✅');
+      render();
+    }catch{
+      flash('Ошибка: неверный файл ⚠️',false);
+    }
+  };
+  reader.readAsText(file);
+}
+function flash(msg,ok){
+  const el=document.getElementById('fl'); if(!el)return;
+  el.textContent=msg;
+  el.style.background=ok===false?'#991b1b':'#15803d';
+  el.style.display='block';
+  clearTimeout(flashTmr);
+  flashTmr=setTimeout(()=>{if(el)el.style.display='none';},2500);
+}
+function syncForm(){
+  ['date','ticker','sysTp','myTp','result','balance'].forEach(k=>{
+    const el=document.getElementById('f-'+k);
+    if(el) form[k]=k==='ticker'?el.value.toUpperCase():el.value;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  3 УРОВНЯ НАФСА — ТОЛЬКО САХИХ ДАЛИЛИ ИЗ КОРАНА
+// ═══════════════════════════════════════════════════════════════════════════
+function nafsLevel(pct){
+  if(pct===null) return null;
+  // Уровень 3 — نفس مطمئنة (80%+)
+  // Далиль: Аль-Фаджр 89:27-28 — прямо назван в Коране
+  if(pct>=80) return{level:3,emoji:'💚',color:'#16a34a',bg:'#0a2010',border:'#1a4a22',
+    ar:'نفس مطمئنة',ru:"Мутма'инна",
+    ayah:'يَا أَيَّتُهَا النَّفْسُ الْمُطْمَئِنَّةُ ارْجِعِي إِلَىٰ رَبِّكِ رَاضِيَةً مَّرْضِيَّةً',
+    ayahRu:'«О душа успокоившаяся! Вернись к Господу твоему довольной и угодной»',
+    ref:'Аль-Фаджр, 89:27–28',
+    desc:'Нафс подчинён Аллаху. Ты следуешь системе осознанно, с таваккулем.',
+    tip:'Ма шаа Аллах! Не расслабляйся — нафс ждёт момента слабости.'};
+  // Уровень 2 — نفس لوامة (50–79%)
+  // Далиль: Аль-Кыяма 75:2 — прямо назван в Коране
+  if(pct>=50) return{level:2,emoji:'💛',color:'#ca8a04',bg:'#1a1200',border:'#78350f',
+    ar:'نفس لوَّامة',ru:'Лаввама',
+    ayah:'وَلَا أُقْسِمُ بِالنَّفْسِ اللَّوَّامَةِ',
+    ayahRu:'«Клянусь душой упрекающей!»',
+    ref:'Аль-Кыяма, 75:2',
+    desc:'Ты видишь свои ошибки и упрекаешь себя. Это начало исправления.',
+    tip:'Мухасаба каждую ночь. Осознание — первый шаг к изменению.'};
+  // Уровень 1 — نفس أمارة بالسوء (0–49%)
+  // Далиль: Юсуф 12:53 — прямо назван в Коране
+  return{level:1,emoji:'🔴',color:'#dc2626',bg:'#1f0a0a',border:'#3a1010',
+    ar:'نفس أمَّارة بالسُّوء',ru:"Аммара бис-су'",
+    ayah:'إِنَّ النَّفْسَ لَأَمَّارَةٌ بِالسُّوءِ إِلَّا مَا رَحِمَ رَبِّي',
+    ayahRu:'«Поистине, нафс повелевает злом, кроме тех, кого помиловал мой Господь»',
+    ref:'Юсуф, 12:53',
+    desc:'Нафс берёт верх: входишь без сигнала, меняешь тейк, не берёшь стоп.',
+    tip:"А'узу биллахи минаш-шайтанир-раджим. Начни с одного правила."};
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SVG ГРАФИК
+// ═══════════════════════════════════════════════════════════════════════════
+function drawChart(){
+  if(entries.length<2) return'<div style="color:#4a7a4e;font-size:12px;text-align:center;padding:16px">Добавь 2+ записи — появится график</div>';
+  const W=300,H=120,PL=38,PR=8,PT=8,PB=18,cw=W-PL-PR,ch=H-PT-PB;
+  const vals=entries.map(e=>e.balance);
+  const mn=Math.min(...vals)*0.97, mx=Math.max(...vals)*1.03;
+  const tx=i=>(PL+i/(entries.length-1)*cw).toFixed(1);
+  const ty=v=>(PT+ch-((v-mn)/(mx-mn))*ch).toFixed(1);
+  const line=entries.map((e,i)=>`${i?'L':'M'}${tx(i)},${ty(e.balance)}`).join(' ');
+  const area=line+` L${tx(entries.length-1)},${PT+ch} L${PL},${PT+ch} Z`;
+  const dots=entries.map((e,i)=>{
+    const s=scoreOf(e);
+    const c=s>0?'#4ade80':s<0?'#f87171':'#86efac';
+    return`<circle cx="${tx(i)}" cy="${ty(e.balance)}" r="3.5" fill="${c}" stroke="#0f1a10" stroke-width="1"/>`;
+  }).join('');
+  const step=Math.max(1,Math.ceil(entries.length/5));
+  const xl=entries.filter((_,i)=>i%step===0||i===entries.length-1).map(e=>{
+    const i=entries.indexOf(e);
+    return`<text x="${tx(i)}" y="${H-2}" font-size="8" fill="#4a7a4e" text-anchor="middle">${e.date.slice(5)}</text>`;
+  }).join('');
+  const yl=[mn,(mn+mx)/2,mx].map(v=>`<text x="${PL-3}" y="${(parseFloat(ty(v))+4).toFixed(1)}" font-size="8" fill="#4a7a4e" text-anchor="end">$${Math.round(v)}</text>`).join('');
+  return`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" xmlns="http://www.w3.org/2000/svg">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#4ade80" stop-opacity=".25"/>
+    <stop offset="100%" stop-color="#4ade80" stop-opacity="0"/>
+  </linearGradient><clipPath id="cp"><rect x="${PL}" y="${PT}" width="${cw}" height="${ch}"/></clipPath></defs>
+  <line x1="${PL}" y1="${PT}" x2="${PL}" y2="${PT+ch}" stroke="#1a3020" stroke-width="1"/>
+  <line x1="${PL}" y1="${PT+ch}" x2="${PL+cw}" y2="${PT+ch}" stroke="#1a3020" stroke-width="1"/>
+  <line x1="${PL}" y1="${(PT+ch/2).toFixed(1)}" x2="${PL+cw}" y2="${(PT+ch/2).toFixed(1)}" stroke="#1a3020" stroke-width=".5" stroke-dasharray="3,3"/>
+  <g clip-path="url(#cp)">
+    <path d="${area}" fill="url(#bg)"/>
+    <path d="${line}" fill="none" stroke="#4ade80" stroke-width="2"/>
+    ${dots}
+  </g>
+  ${yl}${xl}</svg>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  КАРТОЧКА ЗАПИСИ
+// ═══════════════════════════════════════════════════════════════════════════
+function entryCard(e, idx, compact){
+  const s=scoreOf(e), prev=prevBal(idx), diff=prev!==null?(e.balance-prev):null;
+  let detail='', borderColor='#1e3a23';
+
+  if(e.type==='start'){
+    detail='🏁 Начальный баланс';
+    borderColor='#2d4a30';
+  } else if(e.type==='notrade'){
+    detail = e.followed ? '🚫 Не торговал → ✅ устоял' : '🚫 Не торговал → ❌ вошёл';
+    borderColor = s>0?'#1a4a22':'#3a1010';
+  } else {
+    const match=parseFloat(e.sysTp)===parseFloat(e.myTp);
+    detail=`📈 ${e.ticker||'—'} | тейк: ${e.sysTp}%→${e.myTp}% ${match?'✅':'❌'}`;
+    borderColor=s>0?'#1a4a22':'#3a1010';
+  }
+
+  return`<div style="background:#132017;border:1px solid ${borderColor};border-radius:14px;padding:12px 14px;margin-bottom:8px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+    <span style="font-size:11px;color:#4a7a4e">${e.date}</span>
+    <span style="font-size:15px;font-weight:800;color:${s>0?'#4ade80':s<0?'#f87171':'#86efac'}">${s>0?'+1':s<0?'−1':'—'}</span>
+  </div>
+  <div style="font-size:12px;color:#86efac;margin-bottom:6px">${detail}</div>
+  <div style="display:flex;gap:10px;font-size:11px;flex-wrap:wrap">
+    ${prev!==null&&e.type!=='start'?`<span style="color:#4a7a4e">До: <b style="color:#86efac">$${prev.toFixed(2)}</b></span>`:''}
+    <span style="color:#4a7a4e">${e.type==='start'?'Старт':'После'}: <b style="color:${diff===null||diff>=0?'#4ade80':'#f87171'}">$${e.balance.toFixed(2)}</b></span>
+    ${diff!==null&&e.type!=='start'?`<span style="font-weight:700;color:${diff>=0?'#4ade80':'#f87171'}">${diff>=0?'+':''}$${diff.toFixed(2)}</span>`:''}
+    ${e.result?`<span style="color:#4a7a4e">Итог: <b style="color:${parseFloat(e.result)>=0?'#4ade80':'#f87171'}">${parseFloat(e.result)>0?'+':''}${e.result}%</b></span>`:''}
+  </div>
+  ${!compact?`<div style="display:flex;gap:12px;margin-top:8px">
+    <button data-a="edit" data-id="${e.id}" style="background:#1a3020;border-radius:8px;padding:5px 12px;color:#86efac;font-size:11px;font-weight:600">✏️ Изменить</button>
+    <button data-a="del"  data-id="${e.id}" style="background:#1f0a0a;border-radius:8px;padding:5px 12px;color:#f87171;font-size:11px;font-weight:600">🗑 Удалить</button>
+  </div>`:''}
+</div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  СТРАНИЦА — ИТОГИ
+// ═══════════════════════════════════════════════════════════════════════════
+function pageDashboard(){
+  // Если нет начального баланса — показываем онбординг
+  if(!entries.length){
+    return`<div style="background:#132017;border:2px dashed #2d4a30;border-radius:18px;padding:28px 20px;text-align:center">
+      <div style="font-size:40px;margin-bottom:12px">🏁</div>
+      <div style="font-size:16px;font-weight:700;color:#86efac;margin-bottom:8px">Первый шаг</div>
+      <div style="font-size:13px;color:#4a7a4e;margin-bottom:20px;line-height:1.6">Введи свой текущий баланс счёта.<br>Это делается <b style="color:#86efac">один раз</b> — потом система запоминает автоматически.</div>
+      <div style="font-size:11px;color:#6aaf70;margin-bottom:6px">Стартовый баланс</div>
+      <input id="start-inp" type="number" placeholder="128.50" style="width:100%;background:#0d1f0e;border:1px solid #1e3a23;border-radius:10px;padding:12px 14px;color:#4ade80;font-size:26px;font-weight:800;outline:none;margin-bottom:14px;text-align:center"/>
+      <button data-a="set-start" style="width:100%;background:linear-gradient(135deg,#15803d,#16a34a);border-radius:14px;padding:14px;color:#fff;font-size:15px;font-weight:700">
+        Установить — بسم الله
+      </button>
+    </div>`;
+  }
+
+  const t=totals(), lb=lastBal(), fb=startBal();
+  const change=lb&&fb ? (lb-fb) : null;
+  const pct=goodPct(), lv=nafsLevel(pct);
+  const recent=[...entries].reverse().slice(0,5).map((e,ri)=>entryCard(e,entries.length-1-ri,true)).join('');
+
+  const nafsBlock=lv?`
+  <div style="background:${lv.bg};border:2px solid ${lv.border};border-radius:18px;padding:16px;margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div>
+        <div style="font-size:10px;color:#4a7a4e;letter-spacing:1px;text-transform:uppercase;margin-bottom:3px">Уровень нафса</div>
+        <div style="font-size:20px;font-weight:800;color:${lv.color}">${lv.ar}</div>
+        <div style="font-size:13px;color:${lv.color};opacity:.8">${lv.ru}</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:32px">${lv.emoji}</div>
+        <div style="font-size:10px;color:#4a7a4e;margin-top:2px">${lv.level} из 3</div>
+        <div style="display:flex;gap:3px;margin-top:4px;justify-content:center">
+          ${[1,2,3].map(n=>`<div style="width:12px;height:12px;border-radius:50%;background:${n<=lv.level?lv.color:'#1a3020'}"></div>`).join('')}
+        </div>
+      </div>
+    </div>
+    <div style="background:rgba(0,0,0,.3);border-radius:10px;padding:10px;margin-bottom:8px;text-align:center">
+      <div class="ar">${lv.ayah}</div>
+      <div style="font-size:11px;color:#fbbf24;margin-top:4px;font-style:italic">${lv.ayahRu}</div>
+      <div style="font-size:10px;color:#92400e;margin-top:2px">${lv.ref}</div>
+    </div>
+    <div style="font-size:12px;color:#86efac;margin-bottom:4px">${lv.desc}</div>
+    <div style="font-size:11px;color:${lv.color};font-weight:600">→ ${lv.tip}</div>
+  </div>`
+  :`<div style="background:#132017;border:1px solid #1e3a23;border-radius:16px;padding:14px;margin-bottom:12px;text-align:center;color:#4a7a4e;font-size:13px">Добавь торговые записи — узнай уровень нафса</div>`;
+
+  return`
+  <div style="background:linear-gradient(135deg,#0d3318,#1a4a22);border-radius:18px;padding:16px;margin-bottom:12px;border:1px solid #2d4a30">
+    <div style="font-size:10px;color:#4ade80;opacity:.7;letter-spacing:1px;text-transform:uppercase">Текущий баланс</div>
+    <div style="font-size:40px;font-weight:800;color:#fff;letter-spacing:-1px;margin:4px 0 2px">$${lb?lb.toFixed(2):'—'}</div>
+    ${change!==null?`<div style="font-size:13px;font-weight:600;color:${change>=0?'#4ade80':'#f87171'}">${change>=0?'+':''}$${change.toFixed(2)} со старта ($${fb.toFixed(2)})</div>`:''}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+    <div style="background:#0a2010;border:1px solid #1a4a22;border-radius:14px;padding:12px;text-align:center">
+      <div style="font-size:26px;font-weight:800;color:#4ade80">+${t.good}</div>
+      <div style="font-size:10px;color:#4a7a4e;margin-top:2px">✅ Следовал</div>
+    </div>
+    <div style="background:#1f0a0a;border:1px solid #3a1010;border-radius:14px;padding:12px;text-align:center">
+      <div style="font-size:26px;font-weight:800;color:#f87171">−${t.bad}</div>
+      <div style="font-size:10px;color:#4a7a4e;margin-top:2px">❌ Нафс</div>
+    </div>
+    <div style="background:#132017;border:1px solid #1e3a23;border-radius:14px;padding:12px;text-align:center">
+      <div style="font-size:26px;font-weight:800;color:${t.score>=0?'#4ade80':'#f87171'}">${t.score>=0?'+':''}${t.score}</div>
+      <div style="font-size:10px;color:#4a7a4e;margin-top:2px">${pct!==null?pct+'%':''} Счёт</div>
+    </div>
+  </div>
+
+  ${nafsBlock}
+
+  ${entries.length>=2?`<div style="background:#132017;border:1px solid #1e3a23;border-radius:16px;padding:14px;margin-bottom:12px">
+    <div style="font-size:12px;font-weight:600;color:#86efac;margin-bottom:8px">График баланса
+      <span style="font-size:10px;color:#4a7a4e;font-weight:400"> ● зелёный=+1 красный=−1</span>
+    </div>${drawChart()}</div>`:''}
+
+  <div style="font-size:12px;font-weight:600;color:#86efac;margin-bottom:8px">Последние записи</div>
+  ${recent}
+  ${entries.length>5?`<button data-a="nav-history" style="width:100%;background:none;color:#4a7a4e;font-size:12px;text-decoration:underline;padding:6px 0">Все записи (${entries.length}) →</button>`:''}`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  СТРАНИЦА — ЗАПИСЬ
+// ═══════════════════════════════════════════════════════════════════════════
+function pageAdd(){
+  // Если нет начального баланса — отправляем на главную
+  if(!entries.length){
+    return`<div style="background:#132017;border:1px solid #1e3a23;border-radius:16px;padding:20px;text-align:center">
+      <div style="color:#4a7a4e;font-size:13px;margin-bottom:12px">Сначала введи стартовый баланс</div>
+      <button data-a="nav-dashboard" style="background:linear-gradient(135deg,#15803d,#16a34a);border-radius:12px;padding:10px 22px;color:#fff;font-size:13px;font-weight:700">Перейти к старту →</button>
+    </div>`;
+  }
+
+  const prev=lastBal();
+  const s=parseFloat(form.sysTp), m=parseFloat(form.myTp);
+  const tpOk=!isNaN(s)&&!isNaN(m)&&form.sysTp!==''&&form.myTp!=='';
+  const tpMatch=tpOk&&s===m;
+  const tpPreview=tpOk?`<div style="margin-top:8px;padding:10px;border-radius:10px;background:${tpMatch?'#0a2010':'#1f0a0a'};border:1px solid ${tpMatch?'#1a4a22':'#3a1010'};font-size:13px;font-weight:700;color:${tpMatch?'#4ade80':'#f87171'};text-align:center">${tpMatch?'✅ Тейк по системе → +1':`❌ Изменил тейк: ${s}%→${m}% → −1`}</div>`:'';
+  const isEdit=!!form.editId;
+
+  return`
+  ${isEdit?`<div style="background:#0a0f1f;border:2px solid #3b82f6;border-radius:14px;padding:10px 14px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center">
+    <span style="font-size:13px;color:#3b82f6;font-weight:700">✏️ Режим редактирования</span>
+    <button data-a="cancel-edit" style="background:#1a2a5a;border-radius:8px;padding:4px 10px;color:#86efac;font-size:11px">Отмена</button>
+  </div>`:`<div style="background:linear-gradient(135deg,#1a1200,#2a1f00);border:1px solid #78350f;border-radius:14px;padding:10px;margin-bottom:10px;text-align:center">
+    <div class="ar" style="font-size:14px">بسم الله الرحمن الرحيم</div>
+  </div>`}
+
+  <div style="background:#132017;border:1px solid #1e3a23;border-radius:14px;padding:12px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px">
+    <span style="font-size:18px">📅</span>
+    <input type="date" id="f-date" value="${form.date}" style="background:none;border:none;color:#e8f5e9;font-size:15px;font-weight:600;outline:none;flex:1"/>
+  </div>
+
+  <div style="font-size:11px;color:#6aaf70;margin-bottom:7px;font-weight:600">ШАГ 1 — Что сказала система?</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+    <button data-a="type-notrade" style="padding:16px 8px;border-radius:14px;border:2px solid ${form.type==='notrade'?'#ca8a04':'#1e3a23'};background:${form.type==='notrade'?'#1a1200':'#132017'};color:${form.type==='notrade'?'#fbbf24':'#4a7a4e'};font-size:13px;font-weight:600;line-height:1.6">
+      🚫 НЕ<br>торговать
+    </button>
+    <button data-a="type-trade" style="padding:16px 8px;border-radius:14px;border:2px solid ${form.type==='trade'?'#16a34a':'#1e3a23'};background:${form.type==='trade'?'#0a2010':'#132017'};color:${form.type==='trade'?'#4ade80':'#4a7a4e'};font-size:13px;font-weight:600;line-height:1.6">
+      📈 Торговать<br>с тейком
+    </button>
+  </div>
+
+  ${form.type==='notrade'?`
+  <div style="font-size:11px;color:#6aaf70;margin-bottom:7px;font-weight:600">ШАГ 2 — Ты последовал системе?</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+    <button data-a="followed-yes" style="padding:18px 8px;border-radius:14px;border:2px solid ${form.followed===true?'#16a34a':'#1e3a23'};background:${form.followed===true?'#0a2010':'#132017'};text-align:center">
+      <div style="font-size:13px;font-weight:700;color:${form.followed===true?'#4ade80':'#4a7a4e'}">✅ Не вошёл</div>
+      <div style="font-size:26px;font-weight:800;color:#4ade80;margin:4px 0">+1</div>
+      <div style="font-size:10px;color:#4a7a4e">устоял нафсу</div>
+    </button>
+    <button data-a="followed-no" style="padding:18px 8px;border-radius:14px;border:2px solid ${form.followed===false?'#dc2626':'#1e3a23'};background:${form.followed===false?'#1f0a0a':'#132017'};text-align:center">
+      <div style="font-size:13px;font-weight:700;color:${form.followed===false?'#f87171':'#4a7a4e'}">❌ Вошёл</div>
+      <div style="font-size:26px;font-weight:800;color:#f87171;margin:4px 0">−1</div>
+      <div style="font-size:10px;color:#4a7a4e">нафс победил</div>
+    </button>
+  </div>`:''}
+
+  ${form.type==='trade'?`
+  <div style="font-size:11px;color:#6aaf70;margin-bottom:7px;font-weight:600">ШАГ 2 — Детали сделки</div>
+  <div style="background:#132017;border:1px solid #1e3a23;border-radius:14px;padding:12px 14px;margin-bottom:12px">
+    <div style="margin-bottom:10px">
+      <div style="font-size:10px;color:#4a7a4e;margin-bottom:4px">Тикер (необязательно)</div>
+      <input id="f-ticker" type="text" placeholder="ABCD" value="${form.ticker}" style="width:100%;background:#0d1f0e;border:1px solid #1e3a23;border-radius:10px;padding:9px 12px;color:#e8f5e9;outline:none;text-transform:uppercase"/>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <div style="font-size:10px;color:#4a7a4e;margin-bottom:4px">Системный тейк %</div>
+        <input id="f-sysTp" type="number" placeholder="20" value="${form.sysTp}" style="width:100%;background:#0d1f0e;border:1px solid #1e3a23;border-radius:10px;padding:9px 12px;color:#e8f5e9;outline:none"/>
+      </div>
+      <div>
+        <div style="font-size:10px;color:#4a7a4e;margin-bottom:4px">Мой тейк %</div>
+        <input id="f-myTp" type="number" placeholder="20" value="${form.myTp}" style="width:100%;background:#0d1f0e;border:2px solid ${tpOk?(tpMatch?'#16a34a':'#dc2626'):'#1e3a23'};border-radius:10px;padding:9px 12px;color:#e8f5e9;outline:none"/>
+      </div>
+    </div>
+    ${tpPreview}
+    <div style="margin-top:10px">
+      <div style="font-size:10px;color:#4a7a4e;margin-bottom:4px">Результат % (необязательно)</div>
+      <input id="f-result" type="number" placeholder="+20 или -15" value="${form.result}" style="width:100%;background:#0d1f0e;border:1px solid #1e3a23;border-radius:10px;padding:9px 12px;color:#e8f5e9;outline:none"/>
+    </div>
+  </div>`:''}
+
+  ${form.type!==null?`
+  <div style="font-size:11px;color:#6aaf70;margin-bottom:7px;font-weight:600">ШАГ 3 — Баланс сейчас</div>
+  <div style="background:#132017;border:1px solid #1e3a23;border-radius:14px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:11px;color:#4a7a4e;margin-bottom:8px">Предыдущий: <b style="color:#86efac;font-size:14px">$${prev!==null?prev.toFixed(2):'—'}</b></div>
+    <input id="f-balance" type="number" placeholder="128.50" value="${form.balance}" style="width:100%;background:#0d1f0e;border:1px solid #1e3a23;border-radius:10px;padding:10px 14px;color:#4ade80;font-size:24px;font-weight:800;outline:none"/>
+  </div>
+  <button data-a="save" style="width:100%;background:${isEdit?'linear-gradient(135deg,#1d4ed8,#3b82f6)':'linear-gradient(135deg,#15803d,#16a34a)'};border-radius:14px;padding:15px;color:#fff;font-size:15px;font-weight:700">
+    ${isEdit?'✏️ Сохранить изменения':'Сохранить — بسم الله'}
+  </button>`:''}`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  СТРАНИЦА — ИСТОРИЯ
+// ═══════════════════════════════════════════════════════════════════════════
+function pageHistory(){
+  const dataBlock=`
+  <div style="background:#132017;border:1px solid #1e3a23;border-radius:16px;padding:14px 16px;margin-bottom:12px">
+    <div style="font-size:12px;font-weight:700;color:#86efac;margin-bottom:12px">💾 Управление данными</div>
+    <div style="font-size:11px;color:#4a7a4e;margin-bottom:12px;line-height:1.6">
+      Экспортируй данные — чтобы перенести на другое устройство или сделать резервную копию. Импортируй — чтобы восстановить.
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <button data-a="export" style="padding:12px 8px;border-radius:12px;background:#0a2010;border:1px solid #1a4a22;color:#4ade80;font-size:13px;font-weight:700">
+        ⬇️ Экспорт<br><span style="font-size:10px;color:#4a7a4e;font-weight:400">скачать данные</span>
+      </button>
+      <label style="padding:12px 8px;border-radius:12px;background:#0a0f1f;border:1px solid #1a2a5a;color:#3b82f6;font-size:13px;font-weight:700;text-align:center;cursor:pointer">
+        ⬆️ Импорт<br><span style="font-size:10px;color:#4a7a4e;font-weight:400">загрузить данные</span>
+        <input type="file" id="import-file" accept=".json" style="display:none"/>
+      </label>
+    </div>
+    <div style="font-size:10px;color:#2d4a30;margin-top:10px;text-align:center">
+      Записей сохранено: ${entries.length}
+    </div>
+  </div>`;
+
+  if(!entries.length) return dataBlock+'<div style="background:#132017;border:1px solid #1e3a23;border-radius:16px;padding:28px;text-align:center;color:#4a7a4e">Нет записей</div>';
+  return dataBlock+[...entries].reverse().map((e,ri)=>entryCard(e,entries.length-1-ri,false)).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  СТРАНИЦА — ЧЕКЛИСТ
+// ═══════════════════════════════════════════════════════════════════════════
+function pageChecklist(){
+  const lv=nafsLevel(goodPct());
+  const lb=lastBal(), fb=startBal();
+  const gap=lb&&fb ? (lb-fb) : null;
+  const allLevels=[
+    {level:3,ar:'نفس مطمئنة',ru:"Мутма'инна",ref:'Аль-Фаджр, 89:27–28',color:'#16a34a',emoji:'💚',pct:'80–100%',
+     ayah:'يَا أَيَّتُهَا النَّفْسُ الْمُطْمَئِنَّةُ'},
+    {level:2,ar:'نفس لوَّامة',ru:'Лаввама',   ref:'Аль-Кыяма, 75:2',   color:'#ca8a04',emoji:'💛',pct:'50–79%',
+     ayah:'وَلَا أُقْسِمُ بِالنَّفْسِ اللَّوَّامَةِ'},
+    {level:1,ar:'نفس أمَّارة بالسُّوء',ru:"Аммара бис-су'",ref:'Юсуф, 12:53',color:'#dc2626',emoji:'🔴',pct:'0–49%',
+     ayah:'إِنَّ النَّفْسَ لَأَمَّارَةٌ بِالسُّوءِ'},
+  ];
+  const cur=lv?lv.level:0;
+  return`
+  <div style="background:linear-gradient(135deg,#1a1200,#2a1f00);border:1px solid #78350f;border-radius:18px;padding:18px 16px;margin-bottom:12px;text-align:center">
+    <div style="font-size:10px;color:#92400e;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Ду'а перед каждой сделкой</div>
+    <div class="ar">اللَّهُمَّ أَلْهِمْنِي رُشْدِي وَأَعِذْنِي مِنْ شَرِّ نَفْسِي</div>
+    <div style="font-size:12px;color:#fbbf24;margin-top:8px;font-style:italic">«О Аллах, внуши мне правильный путь и защити меня от зла моей души»</div>
+    <div style="font-size:10px;color:#92400e;margin-top:3px">Тирмизи — достоверный хадис</div>
+  </div>
+
+  <div style="font-size:12px;font-weight:700;color:#86efac;margin-bottom:8px">📚 3 уровня нафса — далили из Корана</div>
+  ${allLevels.map(l=>`
+  <div style="background:${l.level===cur?l.color+'18':'#132017'};border:${l.level===cur?`2px solid ${l.color}`:'1px solid #1e3a23'};border-radius:14px;padding:12px 14px;margin-bottom:8px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div style="flex:1">
+        <div style="font-size:16px;font-weight:800;color:${l.color}">${l.ar}</div>
+        <div style="font-size:12px;color:${l.color};opacity:.8">${l.ru} • ${l.pct}</div>
+        <div style="font-size:10px;color:#4a7a4e;margin-top:2px">${l.ref}</div>
+        <div style="font-size:13px;color:#fbbf24;direction:rtl;margin-top:6px;line-height:1.6">${l.ayah}</div>
+      </div>
+      <div style="text-align:center;margin-left:10px;flex-shrink:0">
+        <div style="font-size:28px">${l.emoji}</div>
+        ${l.level===cur?`<div style="font-size:9px;color:${l.color};font-weight:700">▲ сейчас</div>`:''}
+      </div>
+    </div>
+  </div>`).join('')}
+
+  <div style="font-size:12px;font-weight:700;color:#86efac;margin:14px 0 8px">3 вопроса перед входом</div>
+  ${[['1. Система дала чёткий сигнал?','⛔ Нет сигнала — не входи. Это نفس أمارة.'],
+     ['2. TP и SL строго по системе?','⛔ Менять тейк после входа — нарушение нията.'],
+     ['3. Я готов принять любой исход?','⛔ Нет таваккуля — пропусти сделку.']
+    ].map(([q,w])=>`<div style="background:#0d1f0e;border-radius:12px;padding:10px 14px;margin-bottom:8px">
+    <div style="font-size:13px;font-weight:600;color:#e8f5e9">${q}</div>
+    <div style="font-size:11px;color:#f87171;margin-top:4px">${w}</div>
+  </div>`).join('')}
+
+  <div style="background:#1a0f00;border:1px solid #78350f;border-radius:16px;padding:14px;margin-bottom:12px">
+    <div style="font-size:12px;font-weight:700;color:#fbbf24;margin-bottom:10px">🔴 Нафс говорит "войди без сигнала"</div>
+    ${['Скажи вслух: أَعُوذُ بِاللَّهِ مِنَ الشَّيْطَانِ الرَّجِيمِ',
+       "Закрой платформу. Встань. Сделай 2 рак'аата.",
+       'Открой этот чеклист. Перечитай 3 вопроса.',
+       '«Это по системе или это азарт?»',
+       gap!==null?`Вспомни: нафс уже стоил $${gap.toFixed(2)}.`:'Посмотри на итоги — цена нафса в $.'
+      ].map((s,i)=>`<div style="display:flex;gap:10px;margin-bottom:8px;align-items:flex-start">
+      <div style="width:20px;height:20px;border-radius:50%;background:#78350f;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fbbf24;flex-shrink:0">${i+1}</div>
+      <span style="font-size:12px;color:#fed7aa;line-height:1.5">${s}</span>
+    </div>`).join('')}
+  </div>
+
+  <div style="background:linear-gradient(135deg,#1a1200,#2a1f00);border:1px solid #78350f;border-radius:16px;padding:14px;text-align:center">
+    <div style="font-size:13px;color:#fbbf24;font-weight:700;margin-bottom:8px">📖 Ночная мухасаба</div>
+    <div class="ar" style="font-size:14px">حَاسِبُوا أَنْفُسَكُمْ قَبْلَ أَنْ تُحَاسَبُوا</div>
+    <div style="font-size:11px;color:#fbbf24;margin-top:6px;font-style:italic">«Делайте самоотчёт прежде чем с вас спросят отчёт»</div>
+    <div style="font-size:10px;color:#92400e;margin-top:3px">Умар ибн аль-Хаттаб رضي الله عنه</div>
+    <button data-a="nav-add" style="width:100%;background:#78350f;border-radius:12px;padding:12px;color:#fff;font-size:13px;font-weight:700;margin-top:12px">Записать сделку — بسم الله</button>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  РЕНДЕР
+// ═══════════════════════════════════════════════════════════════════════════
+function render(){
+  const pct=goodPct(), lv=nafsLevel(pct);
+  const navs=[{id:'dashboard',icon:'📊',lbl:'Итоги'},{id:'add',icon:'✏️',lbl:'Запись'},{id:'history',icon:'📋',lbl:'История'},{id:'checklist',icon:'🤲',lbl:'Чеклист'}];
+  document.getElementById('app').innerHTML=`
+  <div style="background:linear-gradient(135deg,#0d3318,#1a4a22);padding:12px 16px 10px;border-bottom:1px solid #2d4a30">
+    <div style="max-width:480px;margin:0 auto;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:16px;font-weight:800;color:#86efac">🕌 Нафс-контроль</div>
+        <div style="font-size:10px;color:#4ade80;opacity:.7">Дисциплина трейдера • Ислам</div>
+      </div>
+      <div style="text-align:right">
+        ${lv?`<div style="font-size:12px;font-weight:700;color:${lv.color}">${lv.ar}</div><div style="font-size:10px;color:#4a7a4e">${pct}% • ур. ${lv.level}/3</div>`
+            :`<div style="font-size:11px;color:#4a7a4e">${entries.length?'Добавь торг. записи':'Установи баланс'}</div>`}
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;background:#0d1f0e;border-bottom:1px solid #1c3320;position:sticky;top:0;z-index:20">
+    ${navs.map(v=>`<button data-a="nav-${v.id}" style="flex:1;padding:9px 2px;background:${view===v.id?'#1a4a22':'transparent'};color:${view===v.id?'#86efac':'#4a7a4e'};font-size:10px;font-weight:${view===v.id?700:400};border-bottom:${view===v.id?'2px solid #4ade80':'2px solid transparent'}">${v.icon}<br>${v.lbl}</button>`).join('')}
+  </div>
+  <div id="fl" style="position:fixed;top:60px;left:50%;transform:translateX(-50%);background:#15803d;color:#fff;padding:8px 16px;border-radius:30px;font-size:13px;z-index:100;display:none;white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.5)"></div>
+  <div style="max-width:480px;margin:0 auto;padding:12px 14px 80px">
+    ${view==='dashboard'?pageDashboard():view==='add'?pageAdd():view==='history'?pageHistory():pageChecklist()}
+  </div>`;
+  attachEvents();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  СОБЫТИЯ
+// ═══════════════════════════════════════════════════════════════════════════
+function attachEvents(){
+  document.getElementById('app').addEventListener('click',e=>{
+    const b=e.target.closest('[data-a]'); if(!b) return;
+    const a=b.dataset.a;
+
+    // Навигация
+    if(a.startsWith('nav-')){view=a.replace('nav-','');render();return;}
+
+    // Установить стартовый баланс
+    if(a==='set-start'){
+      const inp=document.getElementById('start-inp');
+      const val=parseFloat(inp?inp.value:'');
+      if(isNaN(val)||val<=0){flash('Введи корректный баланс ⚠️',false);return;}
+      entries.push({id:Date.now(),date:today(),type:'start',
+        followed:null,ticker:'',sysTp:'',myTp:'',result:'',balance:val});
+      save(); flash('Альхамдулиллах — баланс установлен!');
+      view='dashboard'; render(); return;
+    }
+
+    // Тип записи
+    if(a==='type-notrade'){syncForm();form.type='notrade';form.followed=null;render();return;}
+    if(a==='type-trade')  {syncForm();form.type='trade';render();return;}
+    if(a==='followed-yes'){syncForm();form.followed=true; render();return;}
+    if(a==='followed-no') {syncForm();form.followed=false;render();return;}
+
+    // Отмена редактирования
+    if(a==='cancel-edit'){form=mkForm();view='history';render();return;}
+
+    // Сохранить
+    if(a==='save'){
+      syncForm();
+      if(!form.type){flash('Выбери тип ⚠️',false);return;}
+      if(form.type==='notrade'&&form.followed===null){flash('Укажи: устоял или вошёл ⚠️',false);return;}
+      if(form.type==='trade'&&(!form.sysTp||!form.myTp)){flash('Укажи тейки ⚠️',false);return;}
+      if(!form.balance){flash('Укажи баланс ⚠️',false);return;}
+      const entry={id:form.editId||Date.now(),date:form.date,type:form.type,
+        followed:form.followed,ticker:form.ticker,sysTp:form.sysTp,
+        myTp:form.myTp,result:form.result,balance:parseFloat(form.balance)};
+      if(form.editId){
+        // Режим редактирования — обновляем существующую запись
+        const idx=entries.findIndex(e=>e.id===form.editId);
+        if(idx>=0) entries[idx]=entry;
+        flash('Изменения сохранены ✅');
+      } else {
+        entries.push(entry);
+        flash('Альхамдулиллах — сохранено!');
+      }
+      save(); form=mkForm(); view='dashboard'; render(); return;
+    }
+
+    // Изменить запись
+    if(a==='edit'){
+      const entry=entries.find(e=>e.id===+b.dataset.id);
+      if(entry){
+        form={date:entry.date,type:entry.type==='start'?null:entry.type,
+          followed:entry.followed,ticker:entry.ticker||'',
+          sysTp:entry.sysTp||'',myTp:entry.myTp||'',
+          result:entry.result||'',balance:String(entry.balance),
+          editId:entry.id};
+        view='add'; render();
+      }
+      return;
+    }
+
+    // Удалить запись
+    if(a==='del'){
+      const entry=entries.find(e=>e.id===+b.dataset.id);
+      const label=entry?entry.date:'запись';
+      if(confirm(`Удалить запись от ${label}?`)){
+        entries=entries.filter(e=>e.id!==+b.dataset.id);
+        save(); flash('Удалено'); render();
+      }
+    }
+
+    // Экспорт
+    if(a==='export') exportData();
+  });
+
+  // Импорт — отдельный обработчик на input[type=file]
+  const importFile=document.getElementById('import-file');
+  if(importFile) importFile.addEventListener('change',e=>{
+    importData(e.target.files[0]);
+    e.target.value=''; // сбросить чтобы можно было повторно загрузить
+  });
+
+  // Живое обновление тейка
+  ['f-sysTp','f-myTp'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.addEventListener('input',()=>{syncForm();render();});
+  });
+}
+
+load(); render();
+</script>
+</body>
+</html>
