@@ -23,6 +23,9 @@ button{cursor:pointer;border:none;outline:none}
 input[type=date]::-webkit-calendar-picker-indicator{filter:invert(.5)}
 .ar{direction:rtl;font-size:17px;line-height:1.9;color:#fbbf24}
 </style>
+<!-- Firebase SDK -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 <div id="app"></div>
@@ -69,10 +72,56 @@ function goodPct(){
 }
 function hasStart(){return entries.length>0 && entries[0].type==='start';}
 
-function load(){try{const x=localStorage.getItem(KEY);if(x)entries=JSON.parse(x);}catch{}}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(entries));}catch{}}
+// ═══════════════════════════════════════════════════════════════════════════
+//  FIREBASE — СИНХРОНИЗАЦИЯ МЕЖДУ УСТРОЙСТВАМИ
+// ═══════════════════════════════════════════════════════════════════════════
+let db, docRef, online = false;
 
-// ── Экспорт: скачать данные как JSON файл ────────────────────────────────
+function initFirebase(){
+  const cfg={
+    apiKey:"AIzaSyA2Uey1zaRtd1kuK7BgGO04c3rA5IQEeA4",
+    authDomain:"nafs-tracker-f941c.firebaseapp.com",
+    projectId:"nafs-tracker-f941c",
+    storageBucket:"nafs-tracker-f941c.firebasestorage.app",
+    messagingSenderId:"514666002073",
+    appId:"1:514666002073:web:6868d060860dbe0a902a08"
+  };
+  firebase.initializeApp(cfg);
+  db=firebase.firestore();
+  docRef=db.collection('nafs').doc('burxon');
+
+  // Слушаем изменения в реальном времени
+  docRef.onSnapshot(doc=>{
+    if(doc.exists){
+      entries=doc.data().entries||[];
+      try{localStorage.setItem(KEY,JSON.stringify(entries));}catch{}
+    }
+    online=true;
+    loading=false;
+    render();
+  },err=>{
+    console.warn('Firebase недоступен, используем localStorage',err);
+    try{const x=localStorage.getItem(KEY);if(x)entries=JSON.parse(x);}catch{}
+    online=false;
+    loading=false;
+    render();
+  });
+}
+
+function load(){
+  // Загружаем из localStorage пока Firebase не ответил
+  try{const x=localStorage.getItem(KEY);if(x)entries=JSON.parse(x);}catch{}
+}
+
+function save(){
+  // Сохраняем локально
+  try{localStorage.setItem(KEY,JSON.stringify(entries));}catch{}
+  // Сохраняем в Firebase (все устройства получат обновление)
+  if(docRef){
+    docRef.set({entries:entries,updated:new Date().toISOString()})
+      .catch(e=>console.error('Firebase save error:',e));
+  }
+}
 function exportData(){
   if(!entries.length){flash('Нет данных для экспорта ⚠️',false);return;}
   const json=JSON.stringify(entries,null,2);
@@ -524,6 +573,7 @@ function render(){
       <div style="text-align:right">
         ${lv?`<div style="font-size:12px;font-weight:700;color:${lv.color}">${lv.ar}</div><div style="font-size:10px;color:#4a7a4e">${pct}% • ур. ${lv.level}/3</div>`
             :`<div style="font-size:11px;color:#4a7a4e">${entries.length?'Добавь торг. записи':'Установи баланс'}</div>`}
+        <div style="font-size:9px;margin-top:2px;color:${online?'#4ade80':'#ca8a04'}">${online?'🟢 синхронизировано':'🟡 офлайн'}</div>
       </div>
     </div>
   </div>
@@ -632,7 +682,11 @@ function attachEvents(){
   });
 }
 
-load(); render();
+// Сначала показываем данные из localStorage (быстро)
+load();
+render();
+// Затем подключаем Firebase (реальное время)
+initFirebase();
 </script>
 </body>
 </html>
